@@ -25,6 +25,8 @@ import { Copy } from 'lucide-react'
 import { MobileEditor } from './components/MobileEditor'
 import { DesktopEditor } from './components/DesktopEditor'
 import { getExampleContent } from '@/lib/utils/loadExampleContent'
+import { useIntegrationActions } from '@/hooks/useIntegrationActions'
+import { IntegrationControls } from './IntegrationControls'
 
 export default function WechatEditor() {
   const { toast } = useToast()
@@ -40,10 +42,19 @@ export default function WechatEditor() {
   const [previewSize, setPreviewSize] = useState<PreviewSize>('medium')
   const [isDraft, setIsDraft] = useState(false)
   const [codeTheme, setCodeTheme] = useLocalStorage<CodeThemeId>('code-theme', codeThemes[0].id)
+  const [githubPath, setGithubPath] = useState<string>('')
+  const [githubSha, setGithubSha] = useState<string>()
+  const [lastCommitSha, setLastCommitSha] = useState<string>()
+  const [wechatDraftId, setWechatDraftId] = useState<string>()
+  const [busyAction, setBusyAction] = useState<string | null>(null)
 
   // 使用自定义 hooks
   const { handleEditorChange } = useAutoSave(value, setIsDraft)
   const { handleEditorScroll } = useScrollSync()
+  const { loadFromGitHub, commitEditorMarkdown, importWeChatMarkdown, savePreviewAsDraft } = useIntegrationActions({
+    getMarkdown: () => value,
+    getPreviewHtml: () => previewContent || ''
+  })
 
   // 清除编辑器内容
   const handleClear = useCallback(() => {
@@ -279,6 +290,125 @@ export default function WechatEditor() {
 
   const { wordCount, readingTime } = useWordStats(value)
 
+  const handleLoadFromGitHub = useCallback(async () => {
+    const path = window.prompt('输入要读取的 GitHub Markdown 路径', githubPath || 'content/article.md')
+    if (!path) return
+
+    try {
+      setBusyAction('load')
+      const data = await loadFromGitHub(path)
+      setValue(data.content)
+      setGithubPath(data.path)
+      setGithubSha(data.sha)
+      setIsDraft(false)
+      toast({
+        title: '加载成功',
+        description: `已从 GitHub 加载 ${data.path}`,
+        duration: 3000
+      })
+    } catch (error) {
+      console.error(error)
+      toast({
+        variant: 'destructive',
+        title: '读取失败',
+        description: (error as Error).message || '请稍后重试'
+      })
+    } finally {
+      setBusyAction(null)
+    }
+  }, [githubPath, loadFromGitHub, toast])
+
+  const handleCommitToGitHub = useCallback(async () => {
+    const path = githubPath || window.prompt('输入要提交的 GitHub 路径', 'content/article.md')
+    if (!path) return
+
+    const message = window.prompt('Commit message', `Update ${path}`) || undefined
+
+    try {
+      setBusyAction('commit')
+      const result = await commitEditorMarkdown({ path, sha: githubSha, message })
+      setGithubSha(result.fileSha)
+      setLastCommitSha(result.commitSha)
+      setGithubPath(result.path)
+      setIsDraft(false)
+      toast({
+        title: '提交成功',
+        description: `已提交到 ${result.path}`,
+        duration: 3000
+      })
+    } catch (error) {
+      console.error(error)
+      toast({
+        variant: 'destructive',
+        title: '提交失败',
+        description: (error as Error).message || '请检查 GitHub 配置或冲突信息'
+      })
+    } finally {
+      setBusyAction(null)
+    }
+  }, [commitEditorMarkdown, githubPath, githubSha, toast])
+
+  const handleImportWeChatToGitHub = useCallback(async () => {
+    const title = window.prompt('导入到 GitHub 的标题（用于生成路径）', '') || undefined
+    const commitMessage = window.prompt('Commit message', title ? `Import ${title}` : 'Import from WeChat') || undefined
+
+    try {
+      setBusyAction('import')
+      const result = await importWeChatMarkdown(value, title, commitMessage)
+      setGithubSha(result.fileSha)
+      setLastCommitSha(result.commitSha)
+      setGithubPath(result.path)
+      setIsDraft(false)
+      toast({
+        title: '导入成功',
+        description: `已提交到 ${result.path}`,
+        duration: 3000
+      })
+    } catch (error) {
+      console.error(error)
+      toast({
+        variant: 'destructive',
+        title: '导入失败',
+        description: (error as Error).message || '请检查网络或 GitHub 配置'
+      })
+    } finally {
+      setBusyAction(null)
+    }
+  }, [importWeChatMarkdown, toast, value])
+
+  const handleSaveDraft = useCallback(async () => {
+    if (!previewContent) {
+      toast({
+        variant: 'destructive',
+        title: '预览为空',
+        description: '请先生成预览后再保存草稿'
+      })
+      return
+    }
+
+    const draftTitle = window.prompt('草稿标题（可选）', '') || undefined
+
+    try {
+      setBusyAction('draft')
+      const result = await savePreviewAsDraft(draftTitle)
+      setWechatDraftId(result.mediaId)
+      toast({
+        title: '草稿已保存',
+        description: `media_id: ${result.mediaId}`,
+        duration: 3000
+      })
+    } catch (error) {
+      console.error(error)
+      toast({
+        variant: 'destructive',
+        title: '保存失败',
+        description: (error as Error).message || '请检查公众号配置'
+      })
+    } finally {
+      setBusyAction(null)
+    }
+  }, [previewContent, savePreviewAsDraft, toast])
+
   return (
     <div className="relative flex flex-col h-screen">
       {/* 工具栏 */}
@@ -302,6 +432,18 @@ export default function WechatEditor() {
         onPreviewToggle={() => setShowPreview(!showPreview)}
         onCodeThemeChange={setCodeTheme}
         onClear={handleClear}
+      />
+
+      <IntegrationControls
+        githubPath={githubPath}
+        githubSha={githubSha}
+        lastCommitSha={lastCommitSha}
+        wechatDraftId={wechatDraftId}
+        busyAction={busyAction}
+        onLoadFromGitHub={handleLoadFromGitHub}
+        onCommitToGitHub={handleCommitToGitHub}
+        onImportWeChatMarkdown={handleImportWeChatToGitHub}
+        onSaveDraft={handleSaveDraft}
       />
 
       {/* 编辑器主体 */}
